@@ -16,6 +16,8 @@
 
 import socket
 
+from oslo_concurrency import processutils
+
 
 def get_my_ip():
     try:
@@ -29,5 +31,22 @@ def get_my_ip():
 
 
 def get_root_helper():
-    # NOTE (e0ne): We don't use rootwrap now
-    return 'sudo'
+    # TODO(e0ne): use oslo.rootwrap until privsep will be ready for use
+    # FIXME (e0ne): to get attach/detach working we need to run the following
+    # commands:
+    #   $ PATH=$PATH:/lib/udev
+    #   $ export PATH
+    # And execute using following command:
+    #   $ sudo -E PATH=$PATH cinder local-attach <volume_id>
+    return 'sudo env "PATH=$PATH:/lib/udev"'
+
+
+def safe_execute(cmd):
+    try:
+        processutils.execute(*cmd, root_helper=get_root_helper(),
+                             run_as_root=True)
+    except processutils.ProcessExecutionError as e:
+        print('Command "{0}" execution returned {1} exit code:'.format(
+              e.cmd, e.exit_code))
+        print('Stderr: {0}'.format(e.stderr))
+        print('Stdout: {0}'.format(e.stdout))

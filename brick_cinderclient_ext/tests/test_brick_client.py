@@ -14,6 +14,7 @@
 
 import mock
 
+from cinderclient import exceptions as cinder_exceptions
 from oslotest import base
 
 from brick_cinderclient_ext import client
@@ -51,3 +52,120 @@ class TestBrickClient(base.BaseTestCase):
         mock_connector.assert_called_with('root-helper', '1.0.0.0',
                                           enforce_multipath=True,
                                           multipath=True)
+
+    def test_attach_reserve_fail(self):
+        self.client.volumes_client = mock.MagicMock()
+        self.client.volumes_client.volumes.reserve.side_effect = (
+            cinder_exceptions.BadRequest(400))
+        self.assertRaises(cinder_exceptions.BadRequest,
+                          self.client.attach,
+                          'vol_id', 'hostname')
+
+    def _init_fake_cinderclient(self, protocol):
+        # Init fake cinderclient
+        self.mock_vc = mock.MagicMock()
+        conn_data = {'key': 'value'}
+        connection = {'driver_volume_type': protocol, 'data': conn_data}
+        self.mock_vc.volumes.initialize_connection.return_value = connection
+        self.client.volumes_client = self.mock_vc
+        return connection
+
+    def _init_fake_os_brick(self, mock_conn_prop):
+        # Init fakes for os-brick
+        conn_props = mock.Mock()
+        mock_conn_prop.return_value = conn_props
+        mock_connector = mock.MagicMock()
+        mock_connect = mock.Mock()
+        mock_connector.return_value = mock_connect
+        self.client._brick_get_connector = mock_connector
+        mock_connect.connect_volume = mock.Mock()
+
+        return conn_props, mock_connect
+
+    @mock.patch('os_brick.initiator.connector.get_connector_properties')
+    def test_attach_iscsi(self, mock_conn_prop):
+        connection = self._init_fake_cinderclient('iscsi')
+        conn_props, mock_connect = self._init_fake_os_brick(mock_conn_prop)
+
+        self.client.attach(self.volume_id, self.hostname)
+        self.mock_vc.volumes.initialize_connection.assert_called_with(
+            self.volume_id, conn_props)
+        mock_connect.connect_volume.assert_called_with(connection['data'])
+
+    @mock.patch('os_brick.initiator.connector.get_connector_properties')
+    def test_attach_rbd(self, mock_conn_prop):
+        connection = self._init_fake_cinderclient('rbd')
+        conn_props, mock_connect = self._init_fake_os_brick(mock_conn_prop)
+
+        self.client._attach_rbd_volume = mock.Mock()
+        self.client.attach(self.volume_id, self.hostname)
+        self.mock_vc.volumes.initialize_connection.assert_called_with(
+            self.volume_id, conn_props)
+        self.client._attach_rbd_volume.assert_called_with(connection)
+        mock_connect.connect_volume.assert_called_with(connection['data'])
+
+    def test_begin_detaching_fail(self):
+        self.client.volumes_client = mock.MagicMock()
+        self.client.volumes_client.volumes.begin_detaching.side_effect = (
+            cinder_exceptions.BadRequest(400))
+        self.assertRaises(cinder_exceptions.BadRequest,
+                          self.client.detach,
+                          'vol_id')
+
+    @mock.patch('os_brick.initiator.connector.get_connector_properties')
+    def test_detach_iscsi(self, mock_conn_prop):
+        connection = self._init_fake_cinderclient('iscsi')
+        conn_props, m_connect = self._init_fake_os_brick(mock_conn_prop)
+
+        self.client.detach(self.volume_id)
+        self.mock_vc.volumes.initialize_connection.assert_called_with(
+            self.volume_id, conn_props)
+        m_connect.disconnect_volume.assert_called_with(connection['data'], {})
+
+    @mock.patch('os_brick.initiator.connector.get_connector_properties')
+    def test_detach_rbd(self, mock_conn_prop):
+        connection = self._init_fake_cinderclient('rbd')
+        conn_props, mock_connect = self._init_fake_os_brick(mock_conn_prop)
+        self.client._detach_rbd_volume = mock.Mock()
+
+        self.client.detach(self.volume_id)
+        self.mock_vc.volumes.initialize_connection.assert_called_with(
+            self.volume_id, conn_props)
+        mock_connect.disconnect_volume.assert_called_with(
+            connection['data'], {})
+        self.client._detach_rbd_volume.assert_called_with(connection)
+
+    @mock.patch('os_brick.initiator.connector.get_connector_properties')
+    def test_detach_nfs(self, mock_conn_prop):
+        connection = self._init_fake_cinderclient('nfs')
+        conn_props, mock_connect = self._init_fake_os_brick(mock_conn_prop)
+        self.client._detach_nfs_volume = mock.Mock()
+
+        self.client.detach(self.volume_id)
+        self.mock_vc.volumes.initialize_connection.assert_called_with(
+            self.volume_id, conn_props)
+        mock_connect.disconnect_volume.assert_called_with(
+            connection['data'], {})
+        self.client._detach_nfs_volume.assert_called_with(connection)
+
+    @mock.patch('brick_cinderclient_ext.brick_utils.safe_execute')
+    def test__attach_rbd_volume(self, mock_execute):
+        connection = {'data': {'name': 'pool/volume'}}
+        self.client._attach_rbd_volume(connection)
+
+        mock_execute.assert_called_with(['rbd', 'map', 'volume',
+                                         '--pool', 'pool'])
+
+    @mock.patch('brick_cinderclient_ext.brick_utils.safe_execute')
+    def test__detach_rbd_volume(self, mock_execute):
+        connection = {'data': {'name': 'pool/volume'}}
+        self.client._detach_rbd_volume(connection)
+
+        dev_name = '/dev/rbd/pool/volume'
+        mock_execute.assert_called_with(['rbd', 'unmap', dev_name])
+
+    @mock.patch('brick_cinderclient_ext.brick_utils.safe_execute')
+    def test__detach_nfs_volume(self, mock_execute):
+        connection = {'data': {'export': 'export_path'}}
+        self.client._detach_nfs_volume(connection)
+        mock_execute.assert_called_with(['umount', 'export_path'])
